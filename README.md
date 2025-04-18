@@ -25,7 +25,7 @@ If you're looking for production-ready code, this isn't it. But if you want to e
 Clone and setup:
 ```bash
 uv venv  # Create virtual environment using uv
-.\.venv\Scripts\Activate.ps1  # Windows (PowerShell) - Activate the .venv created by uv
+.\.venv\Scripts\activate
 uv pip install -e . -r requirements.txt # Install dependencies using uv
 ```
 
