@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from typing import Optional, List, Union, Literal
 from pydantic import BaseModel, Field
 from openai import OpenAI
-from src.api_requests import BaseOpenaiProcessor, AsyncOpenaiProcessor
+from src.api_requests import BaseGeminiProcessor, AsyncOpenaiProcessor
 import tiktoken
 from tqdm import tqdm
 import logging
@@ -30,7 +30,7 @@ def process_messages():
         level, msg = message_queue.get_nowait()
         tqdm.write(msg)
 
-class TableSerializer(BaseOpenaiProcessor):
+class TableSerializer(BaseGeminiProcessor):
     def __init__(self, preserve_temp_files: bool = True):
         super().__init__()
         self.preserve_temp_files = preserve_temp_files
@@ -118,7 +118,7 @@ class TableSerializer(BaseOpenaiProcessor):
         reponse_schema = TableSerialization.TableBlocksCollection
 
         answer_dict = self.send_message(
-            model='gpt-4o-mini-2024-07-18',
+            model=os.getenv("GEMINI_CHAT_MODEL"),
             temperature=0,
             system_content=system_prompt,
             human_content=user_prompt,
@@ -197,7 +197,7 @@ class TableSerializer(BaseOpenaiProcessor):
             queries.append(query)
 
         results = await AsyncOpenaiProcessor().process_structured_ouputs_requests(
-            model='gpt-4o-mini-2024-07-18',
+            model=os.getenv("GEMINI_CHAT_MODEL"),
             temperature=0,
             system_content=TableSerialization.system_prompt,
             queries=queries,

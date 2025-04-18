@@ -490,17 +490,20 @@ configs = {
 # Just uncomment the method you want to run
 # You can also change the run_config to try out different configurations
 if __name__ == "__main__":
+    # import subprocess
+    # subprocess.run(["python", "-m", "create_subset"])
+
     root_path = here() / "data" / "lecture" # Target the lecture dataset
     pipeline = Pipeline(root_path, run_config=gemini_flash_config) # Use gemini_flash config
 
     # This method parses pdf reports into a jsons. It creates jsons in the debug/data_01_parsed_reports. These jsons used in the next steps.
     # It also stores raw output of docling in debug/data_01_parsed_reports_debug, these jsons contain a LOT of metadata, and not used anywhere
     # pipeline.parse_pdf_reports_sequential()
-    # pipeline.parse_pdf_reports_parallel() # Assuming this was run via main.py already
+    pipeline.parse_pdf_reports_parallel() # Assuming this was run via main.py already
 
     # This method should be called only if you want run configs with serialized tables
     # It modifies the jsons in the debug/data_01_parsed_reports, adding a new field "serialized_table" to each table
-    # pipeline.serialize_tables(max_workers=5)
+    pipeline.serialize_tables(max_workers=5)
 
     # This method converts jsons from the debug/data_01_parsed_reports into much simpler jsons, that is a list of pages in markdown
     # New jsons can be found in debug/data_02_merged_reports

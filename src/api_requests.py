@@ -491,7 +491,7 @@ class AsyncOpenaiProcessor:
 
     async def process_structured_ouputs_requests(
         self,
-        model="gpt-4o-mini-2024-07-18",
+        model=os.getenv("GEMINI_CHAT_MODEL"),
         temperature=0.5,
         seed=None,
         system_content="You are a helpful assistant.",
@@ -501,7 +501,7 @@ class AsyncOpenaiProcessor:
         save_filepath='./temp_async_llm_results.jsonl',
         preserve_requests=False,
         preserve_results=True,
-        request_url="https://api.openai.com/v1/chat/completions",
+        request_url=os.getenv("GEMINI_API_URL"),
         max_requests_per_minute=3_500,
         max_tokens_per_minute=3_500_000,
         token_encoding_name="o200k_base",
@@ -561,7 +561,7 @@ class AsyncOpenaiProcessor:
                     requests_filepath=requests_filepath,
                     save_filepath=save_filepath,
                     request_url=request_url,
-                    api_key=os.getenv("OPENAI_API_KEY"),
+                    api_key=os.getenv("GEMINI_API_KEY"),
                     max_requests_per_minute=max_requests_per_minute,
                     max_tokens_per_minute=max_tokens_per_minute,
                     token_encoding_name=token_encoding_name,
