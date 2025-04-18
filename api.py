@@ -56,6 +56,10 @@ class AnswerResponse(BaseModel):
     reasoning_summary: str | None = None
     relevant_pages: list[int] | None = None
     error: str | None = None  # Add error field
+    # Add model statistics
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 # --- Helper Function to Get Processor ---
@@ -141,21 +145,24 @@ async def ask_question(request: QuestionRequest):
     try:
         processor = get_processor(request.dataset_name, request.config_name)
 
-        # --- Schema Inference (Generic Approach) ---
+        # --- Schema Inference (Streamlined) ---
+        schema_patterns = {
+            "number": ["how much", "what is the value", "what was the total", "number of", "how many"],
+            "name": ["who", "what is the name"],
+            "boolean": ["did ", "is there", "was there", "does ", "are "],
+            "names": ["what are the names", "list the", "what are the"],
+            "comparative": ["compare", "which ", "between"]
+        }
+        
         question_lower = request.question.lower()
-        if any(kw in question_lower for kw in ["how much", "what is the value", "what was the total", "number of", "how many"]):
-            schema_type = "number"
-        elif any(kw in question_lower for kw in ["who", "what is the name"]):
-             schema_type = "name"
-        elif any(kw in question_lower for kw in ["did ", "is there", "was there", "does ", "are "]):
-             schema_type = "boolean"
-        elif any(kw in question_lower for kw in ["what are the names", "list the", "what are the"]):
-             schema_type = "names"
-        elif "compare" in question_lower or "which " in question_lower or "between" in question_lower:
-             schema_type = "comparative"
-        else:
-             schema_type = "generic" # Use the new generic schema
-
+        schema_type = "generic"  # Default schema
+        
+        # Check each pattern group and assign schema if matched
+        for schema, patterns in schema_patterns.items():
+            if any(pattern in question_lower for pattern in patterns):
+                schema_type = schema
+                break
+                
         print(f"Processing question: '{request.question}' with inferred schema: '{schema_type}'")
 
         # --- Run RAG processing in a separate thread ---
@@ -182,89 +189,29 @@ async def ask_question(request: QuestionRequest):
         if not answer_data:
             return AnswerResponse(error="Processor returned no data.")
 
-        # Handle potential errors returned by the processor itself
+        # Handle errors returned by the processor
         if "error" in answer_data and answer_data["error"]:
-            print(f"Processor returned error: {answer_data['error']}")
-            # Try to get details if available
-            detail_ref = answer_data.get("answer_details", {}).get("$ref")
-            error_detail_info = None
-            if detail_ref and detail_ref.startswith("#/answer_details/"):
-                try:
-                    index = int(detail_ref.split("/")[-1])
-                    if (
-                        0 <= index < len(processor.answer_details)
-                        and processor.answer_details[index]
-                    ):
-                        error_detail_info = processor.answer_details[index].get(
-                            "error_traceback"
-                        )
-                except (ValueError, IndexError, AttributeError):
-                    pass  # Ignore if details aren't accessible
             error_message = answer_data["error"]
-            if error_detail_info:
-                error_message += f" | Details: {error_detail_info[:500]}..."  # Truncate long tracebacks
-
             return AnswerResponse(error=error_message)
 
-        # Extract results based on the new_challenge_pipeline structure
-        final_answer = answer_data.get("value")  # 'value' used in new pipeline
-        references = answer_data.get("references", [])
-
-        # Extract details from the answer_details using the $ref
-        step_by_step = None
-        reasoning = None
-        relevant_pages_from_detail = None
-        detail_ref = answer_data.get("answer_details", {}).get("$ref")
-
-        if detail_ref and detail_ref.startswith("#/answer_details/"):
-            try:
-                # The index is stored during processing, access it via processor instance
-                index = int(detail_ref.split("/")[-1])
-                if (
-                    hasattr(processor, "answer_details")
-                    and 0 <= index < len(processor.answer_details)
-                    and processor.answer_details[index]
-                ):
-                    details = processor.answer_details[index]
-                    step_by_step = details.get("step_by_step_analysis")
-                    reasoning = details.get("reasoning_summary")
-                    # Get relevant_pages from details, fallback to main answer_dict if needed
-                    relevant_pages_from_detail = details.get("relevant_pages")
-                else:
-                    print(
-                        f"Warning: Could not find answer details for ref {detail_ref}"
-                    )
-            except (ValueError, IndexError, AttributeError) as detail_err:
-                print(
-                    f"Warning: Error accessing answer details for ref {detail_ref}: {detail_err}"
-                )
-                # Fallback or ignore if details cannot be accessed
-
-        # Consolidate relevant pages (prefer details, fallback to main dict's validated pages)
-        # The main `answer_data` should already have validated pages if `new_challenge_pipeline` is True
-        relevant_pages_final = relevant_pages_from_detail  # Prefer pages from detailed analysis if available
-
-        # If not in details, try getting validated pages from the main answer dict
-        if relevant_pages_final is None:
-            relevant_pages_final = answer_data.get(
-                "relevant_pages"
-            )  # These should be validated ones
-
-        # If still None, extract from references (these are 0-based, convert back to 1-based for consistency if needed)
-        # Note: The processor already validates pages, so this might be redundant unless details are missing
-        if relevant_pages_final is None and references:
-            # References are dicts like {"pdf_sha1": ..., "page_index": 0}
-            # Convert 0-based index back to 1-based for display consistency if needed
-            # Assuming the processor's internal logic uses 1-based, let's stick to what it provides
-            # relevant_pages_final = sorted(list(set(ref.get("page_index", -1) + 1 for ref in references if ref.get("page_index", -1) >= 0)))
-            # Let's trust answer_data["relevant_pages"] as the primary source of 1-based pages
-            pass  # Keep relevant_pages_final as None if not found elsewhere
-
+        # Extract answer information with cleaner fallback pattern
+        # Start with direct fields from answer_data
+        final_answer = answer_data.get("final_answer", answer_data.get("value"))
+        step_by_step = answer_data.get("step_by_step_analysis")
+        reasoning = answer_data.get("reasoning_summary")
+        relevant_pages = answer_data.get("relevant_pages", [])
+        
+        # Get model statistics
+        model_stats = getattr(processor, 'response_data', {}) if hasattr(processor, 'response_data') else {}
+        
         return AnswerResponse(
             answer=final_answer,
             step_by_step_analysis=step_by_step,
             reasoning_summary=reasoning,
-            relevant_pages=relevant_pages_final,
+            relevant_pages=relevant_pages,
+            model=model_stats.get('model'),
+            input_tokens=model_stats.get('input_tokens'),
+            output_tokens=model_stats.get('output_tokens')
         )
 
     except HTTPException as http_exc:
@@ -286,4 +233,4 @@ if __name__ == "__main__":
     os.chdir(project_root)
     print(f"Current working directory: {os.getcwd()}")
     # Use reload=True for development, remove for production
-    uvicorn.run("api:app", host="0.0.0.0", port=8001, reload=False)
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False)

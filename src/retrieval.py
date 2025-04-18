@@ -179,12 +179,8 @@ class VectorRetriever:
             if not metainfo:
                 _log.warning(f"Database entry for '{report.get('name')}' is missing 'metainfo'. Skipping.")
                 continue
-            
-            # Check for various field names that might contain the document identifier
-            # This ensures compatibility with different CSV formats (source_id, company_name, document_name)
-            doc_id = metainfo.get("source_id", 
-                      metainfo.get("company_name", 
-                        metainfo.get("document_name")))
+
+            doc_id = metainfo.get("sha1_name")
             
             if doc_id == source_id:
                 target_report = report

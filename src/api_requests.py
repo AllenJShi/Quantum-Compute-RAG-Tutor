@@ -448,6 +448,12 @@ class APIProcessor:
                             if use_schema_prompt else prompts.ComparativeAnswerPrompt.system_prompt)
             response_format = prompts.ComparativeAnswerPrompt.AnswerSchema
             user_prompt = prompts.ComparativeAnswerPrompt.user_prompt
+        elif schema == "generic":
+            # Add support for the generic schema we created earlier
+            system_prompt = (prompts.AnswerWithRAGContextGenericPrompt.system_prompt_with_schema
+                           if use_schema_prompt else prompts.AnswerWithRAGContextGenericPrompt.system_prompt)
+            response_format = prompts.AnswerWithRAGContextGenericPrompt.AnswerSchema
+            user_prompt = prompts.AnswerWithRAGContextGenericPrompt.user_prompt
         else:
             raise ValueError(f"Unsupported schema: {schema}")
         return system_prompt, response_format, user_prompt
