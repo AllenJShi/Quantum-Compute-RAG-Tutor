@@ -66,22 +66,37 @@ class QuestionsProcessor:
             
         return "\n\n---\n\n".join(context_parts)
 
-    def _extract_references(self, pages_list: list, company_name: str) -> list:
-        # Load companies data
+    def _extract_references(self, pages_list: list, document_name: str) -> list:
+        # Load document metadata
         if self.subset_path is None:
-            raise ValueError("subset_path is required for new challenge pipeline when processing references.")
-        self.companies_df = pd.read_csv(self.subset_path)
-
-        # Find the company's SHA1 from the subset CSV
-        matching_rows = self.companies_df[self.companies_df['company_name'] == company_name]
-        if matching_rows.empty:
-            company_sha1 = ""
+            # Allow proceeding without subset if not strictly needed for references,
+            # but references might be incomplete. Log a warning.
+            print("Warning: subset_path not provided. Cannot extract SHA1 for references.")
+            document_sha1 = ""  # Or handle differently if SHA1 is critical
         else:
-            company_sha1 = matching_rows.iloc[0]['sha1']
+            # Load the mapping (assuming subset.csv maps document_name to sha1)
+            try:
+                self.documents_df = pd.read_csv(self.subset_path)
+                # Check if dataframe has 'source_id' column, if not, use 'company_name' for backward compatibility
+                id_column = 'source_id' if 'source_id' in self.documents_df.columns else 'company_name'
+                self.id_column = id_column  # Store for reuse
+                # Find the document's SHA1 from the subset CSV
+                matching_rows = self.documents_df[self.documents_df[id_column] == document_name]
+                if matching_rows.empty:
+                    print(f"Warning: Could not find SHA1 for document '{document_name}' in {self.subset_path}")
+                    document_sha1 = ""
+                else:
+                    document_sha1 = matching_rows.iloc[0]['sha1']
+            except FileNotFoundError:
+                print(f"Warning: subset_path '{self.subset_path}' not found. Cannot extract SHA1 for references.")
+                document_sha1 = ""
+            except Exception as e:
+                print(f"Warning: Error reading subset_path '{self.subset_path}': {e}. Cannot extract SHA1 for references.")
+                document_sha1 = ""
 
         refs = []
         for page in pages_list:
-            refs.append({"pdf_sha1": company_sha1, "page_index": page})
+            refs.append({"pdf_sha1": document_sha1, "page_index": page})
         return refs
 
     def _validate_page_references(self, claimed_pages: list, retrieval_results: list, min_pages: int = 2, max_pages: int = 8) -> list:
@@ -118,8 +133,8 @@ class QuestionsProcessor:
         
         return validated_pages
 
-    def get_answer_for_company(self, company_name: str, question: str, schema: str) -> dict:
-
+    def get_answer_for_document(self, document_name: str, question: str, schema: str) -> dict:
+        """Retrieves context and generates an answer for a specific document."""
         if self.llm_reranking:
             retriever = HybridRetriever(
                 vector_db_dir=self.vector_db_dir,
@@ -131,20 +146,23 @@ class QuestionsProcessor:
                 documents_dir=self.documents_dir
             )
 
+        # Use the document_name as the source_id
         if self.full_context:
-            retrieval_results = retriever.retrieve_all(company_name)
-        else:           
-            retrieval_results = retriever.retrieve_by_company_name(
-                company_name=company_name,
+            # Call the renamed method with the renamed parameter
+            retrieval_results = retriever.retrieve_all(source_id=document_name)
+        else:
+            # Call the renamed method with the renamed parameter
+            retrieval_results = retriever.retrieve_by_source_id(
+                source_id=document_name,
                 query=question,
                 llm_reranking_sample_size=self.llm_reranking_sample_size,
                 top_n=self.top_n_retrieval,
                 return_parent_pages=self.return_parent_pages
             )
-        
+
         if not retrieval_results:
-            raise ValueError("No relevant context found")
-        
+            raise ValueError(f"No relevant context found in document '{document_name}' for the question.")
+
         rag_context = self._format_retrieval_results(retrieval_results)
         answer_dict = self.openai_processor.get_answer_from_rag_context(
             question=question,
@@ -153,358 +171,331 @@ class QuestionsProcessor:
             model=self.answering_model
         )
         self.response_data = self.openai_processor.response_data
-        if self.new_challenge_pipeline:
-            pages = answer_dict.get("relevant_pages", [])
-            validated_pages = self._validate_page_references(pages, retrieval_results)
-            answer_dict["relevant_pages"] = validated_pages
-            answer_dict["references"] = self._extract_references(validated_pages, company_name)
+
+        # Add validated pages and references (using document_name)
+        pages = answer_dict.get("relevant_pages", [])
+        validated_pages = self._validate_page_references(pages, retrieval_results)
+        answer_dict["relevant_pages"] = validated_pages
+        # References might be less meaningful without a SHA1 if subset.csv is missing/incomplete
+        answer_dict["references"] = self._extract_references(validated_pages, document_name)
+
         return answer_dict
 
-    def _extract_companies_from_subset(self, question_text: str) -> list[str]:
-        """Extract company names from a question by matching against companies in the subset file."""
-        if not hasattr(self, 'companies_df'):
-            if self.subset_path is None:
-                raise ValueError("subset_path must be provided to use subset extraction")
-            self.companies_df = pd.read_csv(self.subset_path)
-        
-        found_companies = []
-        company_names = sorted(self.companies_df['company_name'].unique(), key=len, reverse=True)
-        
-        for company in company_names:
-            escaped_company = re.escape(company)
-            
-            pattern = rf'{escaped_company}(?:\W|$)'
-            
-            if re.search(pattern, question_text, re.IGNORECASE):
-                found_companies.append(company)
-                question_text = re.sub(pattern, '', question_text, flags=re.IGNORECASE)
-        
-        return found_companies
+    def _extract_document_names_from_subset(self, question_text: str) -> list[str]:
+        """
+        Extract document names from a question by matching against names in the subset file.
+        Uses multiple strategies to find document references:
+        1. Exact matches (with word boundaries)
+        2. Partial matches for long document names
+        3. Keyword-based matching for specific topics
+        """
+        if self.subset_path is None or not self.subset_path.exists():
+            print("Warning: subset_path not available for document name extraction from question.")
+            return []  # Cannot extract without the subset file
 
-    def process_question(self, question: str, schema: str):
-        if self.new_challenge_pipeline:
-            extracted_companies = self._extract_companies_from_subset(question)
+        # Ensure DataFrame is loaded only once or if needed
+        if not hasattr(self, 'documents_df') or self.documents_df is None:
+            try:
+                self.documents_df = pd.read_csv(self.subset_path)
+                
+                id_column = 'source_id' if 'source_id' in self.documents_df.columns else 'document_name'
+                self.id_column = id_column  # Store for reuse
+                
+            except Exception as e:
+                print(f"Error loading subset file '{self.subset_path}': {e}")
+                return []
+
+        found_documents = []
+        id_column = getattr(self, 'id_column', 'document_name')
+
+        # Get all document names from the subset file
+        document_names = sorted(self.documents_df[id_column].unique(), key=len, reverse=True)
+        
+        # Strategy 1: Direct regex matching with word boundaries
+        temp_question_text = question_text.lower()  # Work on a lowercase copy
+        for doc_name in document_names:
+            # First try exact match with word boundaries
+            escaped_doc_name = re.escape(doc_name)
+            pattern = rf'\b{escaped_doc_name}\b'  # Match whole words only
+            
+            if re.search(pattern, temp_question_text, re.IGNORECASE):
+                found_documents.append(doc_name)
+                # Remove the found name to avoid re-matching parts of it
+                temp_question_text = re.sub(pattern, '', temp_question_text, flags=re.IGNORECASE)
+        
+        # If no direct matches were found, try more flexible approaches
+        if not found_documents:
+            # Strategy 2: For very long document names (like lecture documents), check for significant substrings
+            for doc_name in document_names:
+                # For long names, try to match by the most distinctive parts
+                if len(doc_name) > 30 and "Module" in doc_name:
+                    module_match = re.search(r'Module-(\d+)', doc_name)
+                    if module_match and f"Module {module_match.group(1)}" in question_text:
+                        found_documents.append(doc_name)
+                        continue
+                
+                # If document has shortened name patterns like "PS1" or "Problem Set 1"
+                if doc_name.startswith("PS") and len(doc_name) <= 5:
+                    ps_number = doc_name[2:]
+                    if f"PS{ps_number}" in question_text or f"Problem Set {ps_number}" in question_text:
+                        found_documents.append(doc_name)
+                        continue
+            
+            # Strategy 3: Topic-based matching (if no direct document reference)
+            # If we have lecture documents and the question mentions specific quantum topics
+            quantum_topics = {
+                "superposition": ["Module-1", "Module 1"],
+                "qubit": ["Module-1", "Module 1"],
+                "measurement": ["Module-2", "Module 2"],
+                "entanglement": ["Module-3", "Module 3"],
+                "quantum gate": ["Module-4", "Module 4"],
+                "quantum algorithm": ["Module-5", "Module 5"],
+                "quantum circuit": ["Module-4", "Module 4"]
+            }
+            
+            # Check if question contains any of these topics
+            for topic, related_modules in quantum_topics.items():
+                if topic in question_text.lower():
+                    # Find documents that match these modules
+                    for doc_name in document_names:
+                        for module_ref in related_modules:
+                            if module_ref in doc_name:
+                                if doc_name not in found_documents:
+                                    found_documents.append(doc_name)
+        
+        # Remove duplicates while preserving order
+        unique_docs = []
+        for doc in found_documents:
+            if doc not in unique_docs:
+                unique_docs.append(doc)
+                
+        return unique_docs
+
+    def process_question(self, question: str, schema: str, target_document_name: Optional[str] = None):
+        """
+        Processes a question, either for a specific target document or by extracting
+        document names from the question text. If no document is specified or extracted,
+        it searches across all available documents.
+        """
+        extracted_document_names = []
+
+        if target_document_name:
+            # If a specific document is targeted, use it directly
+            print(f"Processing question for specified document: '{target_document_name}'")
+            extracted_document_names = [target_document_name]
         else:
-            extracted_companies = re.findall(r'"([^"]*)"', question)
-        
-        if len(extracted_companies) == 0:
-            raise ValueError("No company name found in the question.")
-        
-        if len(extracted_companies) == 1:
-            company_name = extracted_companies[0]
-            answer_dict = self.get_answer_for_company(company_name=company_name, question=question, schema=schema)
+            # Otherwise, try to extract document names from the question
+            print("No target document specified, attempting extraction from question...")
+            extracted_document_names = self._extract_document_names_from_subset(question)
+            if extracted_document_names:
+                print(f"Extracted document names from question: {extracted_document_names}")
+
+        if not extracted_document_names:
+            # --- Search Across All Documents ---
+            print("No specific document identified. Searching across all available documents...")
+            all_doc_names = []
+            
+            # Use id_column attribute if set, otherwise default to 'company_name' for backward compatibility
+            id_column = getattr(self, 'id_column', 'company_name')
+            
+            if hasattr(self, 'documents_df') and self.documents_df is not None:
+                 all_doc_names = self.documents_df[id_column].unique().tolist()
+            elif self.subset_path and self.subset_path.exists():
+                 try:
+                     self.documents_df = pd.read_csv(self.subset_path)
+                     # Check if dataframe has 'source_id' column, if not, use 'company_name'
+                     id_column = 'source_id' if 'source_id' in self.documents_df.columns else 'company_name'
+                     self.id_column = id_column  # Store for reuse
+                     all_doc_names = self.documents_df[id_column].unique().tolist()
+                 except Exception as e:
+                     print(f"Error loading subset file '{self.subset_path}' to get all document names: {e}")
+            
+            if not all_doc_names:
+                 return {
+                    "error": "No documents found in the dataset. Please ensure documents are properly processed and indexed.",
+                    "value": "N/A" 
+                 }
+
+            print(f"Found {len(all_doc_names)} documents to search.")
+            
+            # Initialize retriever
+            if self.llm_reranking:
+                retriever = HybridRetriever(vector_db_dir=self.vector_db_dir, documents_dir=self.documents_dir)
+            else:
+                retriever = VectorRetriever(vector_db_dir=self.vector_db_dir, documents_dir=self.documents_dir)
+
+            all_retrieval_results = []
+            # Track results by document to ensure balanced retrieval
+            doc_results = {}
+            
+            # Define max chunks to retrieve per document to ensure balance
+            chunks_per_doc = max(2, min(5, self.top_n_retrieval // len(all_doc_names) if len(all_doc_names) > 0 else 1))
+            total_chunks_target = min(self.top_n_retrieval * 2, len(all_doc_names) * chunks_per_doc)
+            
+            print(f"Retrieving up to {chunks_per_doc} chunks per document, targeting {total_chunks_target} total chunks")
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel_requests) as executor:
+                future_to_doc = {
+                    executor.submit(
+                        retriever.retrieve_by_source_id,
+                        source_id=doc_name,
+                        query=question,
+                        llm_reranking_sample_size=self.llm_reranking_sample_size,
+                        top_n=chunks_per_doc * 2,  # Get more than needed to allow for filtering
+                        return_parent_pages=self.return_parent_pages
+                    ): doc_name for doc_name in all_doc_names
+                }
+                
+                for future in concurrent.futures.as_completed(future_to_doc):
+                    doc_name = future_to_doc[future]
+                    try:
+                        results = future.result()
+                        if results:
+                            # Add source document info to each result
+                            for result in results:
+                                result['source_document'] = doc_name
+                            
+                            # Store results by document
+                            doc_results[doc_name] = results
+                    except Exception as exc:
+                        print(f"Retrieval failed for document '{doc_name}': {exc}")
+            
+            # Gather top chunks from each document based on relevance
+            if doc_results:
+                # First, sort each document's results by distance (most relevant first)
+                for doc_name, results in doc_results.items():
+                    results.sort(key=lambda x: x.get('distance', float('inf')))
+                    # Only keep the top chunks_per_doc results
+                    doc_results[doc_name] = results[:chunks_per_doc]
+                
+                # Combine all results
+                for results in doc_results.values():
+                    all_retrieval_results.extend(results)
+                
+                # Sort all results by relevance
+                all_retrieval_results.sort(key=lambda x: x.get('distance', float('inf')))
+                
+                # Limit to top_n_retrieval * 2 to prevent context length issues
+                all_retrieval_results = all_retrieval_results[:total_chunks_target]
+                
+                print(f"Gathered {len(all_retrieval_results)} relevant chunks from {len(doc_results)} documents")
+            
+            if not all_retrieval_results:
+                raise ValueError("No relevant context found across any documents for the question.")
+            
+            # Group results by source document for better context organization
+            grouped_results = {}
+            for result in all_retrieval_results:
+                source = result.get('source_document', 'unknown')
+                if source not in grouped_results:
+                    grouped_results[source] = []
+                grouped_results[source].append(result)
+            
+            # Format results in a more structured way, grouping by document
+            context_parts = []
+            for source, results in grouped_results.items():
+                # Add document header
+                context_parts.append(f"Information from document: {source}")
+                
+                # Add text from each chunk
+                for result in results:
+                    page_number = result['page']
+                    text = result['text']
+                    context_parts.append(f'Text retrieved from page {page_number}: \n"""\n{text}\n"""')
+                
+                # Add separator between documents
+                context_parts.append("---")
+            
+            rag_context = "\n\n".join(context_parts)
+            
+            # Get answer with the improved context
+            answer_dict = self.openai_processor.get_answer_from_rag_context(
+                question=question,
+                rag_context=rag_context,
+                schema=schema,
+                model=self.answering_model
+            )
+
+            pages_mentioned = answer_dict.get("relevant_pages", [])
+            retrieved_pages_set = {res['page'] for res in all_retrieval_results}
+            validated_pages = [p for p in pages_mentioned if p in retrieved_pages_set]
+
+            answer_dict["relevant_pages"] = validated_pages
+            answer_dict["references"] = []
+
+            return answer_dict
+            # --- End Search Across All Documents ---
+
+        elif len(extracted_document_names) == 1:
+            # --- Process Single Document ---
+            document_name = extracted_document_names[0]
+            answer_dict = self.get_answer_for_document(document_name=document_name, question=question, schema=schema)
             return answer_dict
         else:
-            return self.process_comparative_question(question, extracted_companies, schema)
-    
-    def _create_answer_detail_ref(self, answer_dict: dict, question_index: int) -> str:
-        """Create a reference ID for answer details and store the details"""
-        ref_id = f"#/answer_details/{question_index}"
-        with self._lock:
-            self.answer_details[question_index] = {
-                "step_by_step_analysis": answer_dict['step_by_step_analysis'],
-                "reasoning_summary": answer_dict['reasoning_summary'],
-                "relevant_pages": answer_dict['relevant_pages'],
-                "response_data": self.response_data,
-                "self": ref_id
-            }
-        return ref_id
+            # --- Process Comparative Question ---
+            print(f"Processing comparative question for documents: {extracted_document_names}")
+            return self.process_comparative_question(question, extracted_document_names, schema)
 
-    def _calculate_statistics(self, processed_questions: List[dict], print_stats: bool = False) -> dict:
-        """Calculate statistics about processed questions."""
-        total_questions = len(processed_questions)
-        error_count = sum(1 for q in processed_questions if "error" in q)
-        na_count = sum(1 for q in processed_questions if (q.get("value") if "value" in q else q.get("answer")) == "N/A")
-        success_count = total_questions - error_count - na_count
-        if print_stats:
-            print(f"\nFinal Processing Statistics:")
-            print(f"Total questions: {total_questions}")
-            print(f"Errors: {error_count} ({(error_count/total_questions)*100:.1f}%)")
-            print(f"N/A answers: {na_count} ({(na_count/total_questions)*100:.1f}%)")
-            print(f"Successfully answered: {success_count} ({(success_count/total_questions)*100:.1f}%)\n")
-        
-        return {
-            "total_questions": total_questions,
-            "error_count": error_count,
-            "na_count": na_count,
-            "success_count": success_count
-        }
-
-    def process_questions_list(self, questions_list: List[dict], output_path: str = None, submission_file: bool = False, team_email: str = "", submission_name: str = "", pipeline_details: str = "") -> dict:
-        total_questions = len(questions_list)
-        # Add index to each question so we know where to write the answer details
-        questions_with_index = [{**q, "_question_index": i} for i, q in enumerate(questions_list)]
-        self.answer_details = [None] * total_questions  # Preallocate list for answer details
-        processed_questions = []
-        parallel_threads = self.parallel_requests
-
-        if parallel_threads <= 1:
-            for question_data in tqdm(questions_with_index, desc="Processing questions"):
-                processed_question = self._process_single_question(question_data)
-                processed_questions.append(processed_question)
-                if output_path:
-                    self._save_progress(processed_questions, output_path, submission_file=submission_file, team_email=team_email, submission_name=submission_name, pipeline_details=pipeline_details)
-        else:
-            with tqdm(total=total_questions, desc="Processing questions") as pbar:
-                for i in range(0, total_questions, parallel_threads):
-                    batch = questions_with_index[i : i + parallel_threads]
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_threads) as executor:
-                        # executor.map will return results in the same order as the input list.
-                        batch_results = list(executor.map(self._process_single_question, batch))
-                    processed_questions.extend(batch_results)
-                    
-                    if output_path:
-                        self._save_progress(processed_questions, output_path, submission_file=submission_file, team_email=team_email, submission_name=submission_name, pipeline_details=pipeline_details)
-                    pbar.update(len(batch_results))
-        
-        statistics = self._calculate_statistics(processed_questions, print_stats = True)
-        
-        return {
-            "questions": processed_questions,
-            "answer_details": self.answer_details,
-            "statistics": statistics
-        }
-
-    def _process_single_question(self, question_data: dict) -> dict:
-        question_index = question_data.get("_question_index", 0)
-        
-        if self.new_challenge_pipeline:
-            question_text = question_data.get("text")
-            schema = question_data.get("kind")
-        else:
-            question_text = question_data.get("question")
-            schema = question_data.get("schema")
-        try:
-            answer_dict = self.process_question(question_text, schema)
-            
-            if "error" in answer_dict:
-                detail_ref = self._create_answer_detail_ref({
-                    "step_by_step_analysis": None,
-                    "reasoning_summary": None,
-                    "relevant_pages": None
-                }, question_index)
-                if self.new_challenge_pipeline:
-                    return {
-                        "question_text": question_text,
-                        "kind": schema,
-                        "value": None,
-                        "references": [],
-                        "error": answer_dict["error"],
-                        "answer_details": {"$ref": detail_ref}
-                    }
-                else:
-                    return {
-                        "question": question_text,
-                        "schema": schema,
-                        "answer": None,
-                        "error": answer_dict["error"],
-                        "answer_details": {"$ref": detail_ref},
-                    }
-            detail_ref = self._create_answer_detail_ref(answer_dict, question_index)
-            if self.new_challenge_pipeline:
-                return {
-                    "question_text": question_text,
-                    "kind": schema,
-                    "value": answer_dict.get("final_answer"),
-                    "references": answer_dict.get("references", []),
-                    "answer_details": {"$ref": detail_ref}
-                }
-            else:
-                return {
-                    "question": question_text,
-                    "schema": schema,
-                    "answer": answer_dict.get("final_answer"),
-                    "answer_details": {"$ref": detail_ref},
-                }
-        except Exception as err:
-            return self._handle_processing_error(question_text, schema, err, question_index)
-
-    def _handle_processing_error(self, question_text: str, schema: str, err: Exception, question_index: int) -> dict:
+    def process_comparative_question(self, question: str, document_names: List[str], schema: str) -> dict:
         """
-        Handle errors during question processing.
-        Log error details and return a dictionary containing error information.
-        """
-        import traceback
-        error_message = str(err)
-        tb = traceback.format_exc()
-        error_ref = f"#/answer_details/{question_index}"
-        error_detail = {
-            "error_traceback": tb,
-            "self": error_ref
-        }
-        
-        with self._lock:
-            self.answer_details[question_index] = error_detail
-        
-        print(f"Error encountered processing question: {question_text}")
-        print(f"Error type: {type(err).__name__}")
-        print(f"Error message: {error_message}")
-        print(f"Full traceback:\n{tb}\n")
-        
-        if self.new_challenge_pipeline:
-            return {
-                "question_text": question_text,
-                "kind": schema,
-                "value": None,
-                "references": [],
-                "error": f"{type(err).__name__}: {error_message}",
-                "answer_details": {"$ref": error_ref}
-            }
-        else:
-            return {
-                "question": question_text,
-                "schema": schema,
-                "answer": None,
-                "error": f"{type(err).__name__}: {error_message}",
-                "answer_details": {"$ref": error_ref},
-            }
-
-    def _post_process_submission_answers(self, processed_questions: List[dict]) -> List[dict]:
-        """
-        Post-process answers for submission format:
-        1. Convert page indices from one-based to zero-based
-        2. Clear references for N/A answers
-        3. Format answers according to submission schema
-        4. Include step_by_step_analysis from answer details
-        """
-        submission_answers = []
-        
-        for q in processed_questions:
-            question_text = q.get("question_text") or q.get("question")
-            kind = q.get("kind") or q.get("schema")
-            value = "N/A" if "error" in q else (q.get("value") if "value" in q else q.get("answer"))
-            references = q.get("references", [])
-            
-            answer_details_ref = q.get("answer_details", {}).get("$ref", "")
-            step_by_step_analysis = None
-            if answer_details_ref and answer_details_ref.startswith("#/answer_details/"):
-                try:
-                    index = int(answer_details_ref.split("/")[-1])
-                    if 0 <= index < len(self.answer_details) and self.answer_details[index]:
-                        step_by_step_analysis = self.answer_details[index].get("step_by_step_analysis")
-                except (ValueError, IndexError):
-                    pass
-            
-            # Clear references if value is N/A
-            if value == "N/A":
-                references = []
-            else:
-                # Convert page indices from one-based to zero-based (competition requires 0-based page indices, but for debugging it is easier to use 1-based)
-                references = [
-                    {
-                        "pdf_sha1": ref["pdf_sha1"],
-                        "page_index": ref["page_index"] - 1
-                    }
-                    for ref in references
-                ]
-            
-            submission_answer = {
-                "question_text": question_text,
-                "kind": kind,
-                "value": value,
-                "references": references,
-            }
-            
-            if step_by_step_analysis:
-                submission_answer["reasoning_process"] = step_by_step_analysis
-            
-            submission_answers.append(submission_answer)
-        
-        return submission_answers
-
-    def _save_progress(self, processed_questions: List[dict], output_path: Optional[str], submission_file: bool = False, team_email: str = "", submission_name: str = "", pipeline_details: str = ""):
-        if output_path:
-            statistics = self._calculate_statistics(processed_questions)
-            
-            # Prepare debug content
-            result = {
-                "questions": processed_questions,
-                "answer_details": self.answer_details,
-                "statistics": statistics
-            }
-            output_file = Path(output_path)
-            debug_file = output_file.with_name(output_file.stem + "_debug" + output_file.suffix)
-            with open(debug_file, 'w', encoding='utf-8') as file:
-                json.dump(result, file, ensure_ascii=False, indent=2)
-            
-            if submission_file:
-                # Post-process answers for submission
-                submission_answers = self._post_process_submission_answers(processed_questions)
-                submission = {
-                    "answers": submission_answers,
-                    "team_email": team_email,
-                    "submission_name": submission_name,
-                    "details": pipeline_details
-                }
-                with open(output_file, 'w', encoding='utf-8') as file:
-                    json.dump(submission, file, ensure_ascii=False, indent=2)
-
-    def process_all_questions(self, output_path: str = 'questions_with_answers.json', team_email: str = "79250515615@yandex.com", submission_name: str = "Ilia_Ris SO CoT + Parent Document Retrieval", submission_file: bool = False, pipeline_details: str = ""):
-        result = self.process_questions_list(
-            self.questions,
-            output_path,
-            submission_file=submission_file,
-            team_email=team_email,
-            submission_name=submission_name,
-            pipeline_details=pipeline_details
-        )
-        return result
-
-    def process_comparative_question(self, question: str, companies: List[str], schema: str) -> dict:
-        """
-        Process a question involving multiple companies in parallel:
+        Process a question involving multiple documents in parallel:
         1. Rephrase the comparative question into individual questions
         2. Process each individual question using parallel threads
         3. Combine results into final comparative answer
         """
-        # Step 1: Rephrase the comparative question
+        # Step 1: Rephrase the comparative question (using document_names)
         rephrased_questions = self.openai_processor.get_rephrased_questions(
             original_question=question,
-            companies=companies
+            companies=document_names  # Pass document_names to the rephrasing prompt
         )
-        
+
         individual_answers = {}
         aggregated_references = []
-        
+
         # Step 2: Process each individual question in parallel
-        def process_company_question(company: str) -> tuple[str, dict]:
-            """Helper function to process one company's question and return (company, answer)"""
-            sub_question = rephrased_questions.get(company)
+        def process_document_question(doc_name: str) -> tuple[str, dict]:
+            """Helper function to process one document's question and return (doc_name, answer)"""
+            sub_question = rephrased_questions.get(doc_name)
             if not sub_question:
-                raise ValueError(f"Could not generate sub-question for company: {company}")
-            
-            answer_dict = self.get_answer_for_company(
-                company_name=company, 
-                question=sub_question, 
-                schema="number"
+                # Attempt to use original question if rephrasing failed for some reason
+                print(f"Warning: Could not generate sub-question for document: {doc_name}. Using original question.")
+                sub_question = question  # Fallback, might not be ideal
+
+            sub_schema = "number" if schema == "comparative" else schema
+
+            answer_dict = self.get_answer_for_document(
+                document_name=doc_name,
+                question=sub_question,
+                schema=sub_schema
             )
-            return company, answer_dict
+            return doc_name, answer_dict
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_company = {
-                executor.submit(process_company_question, company): company 
-                for company in companies
+            future_to_doc = {
+                executor.submit(process_document_question, doc_name): doc_name
+                for doc_name in document_names
             }
-            
-            for future in concurrent.futures.as_completed(future_to_company):
+
+            for future in concurrent.futures.as_completed(future_to_doc):
                 try:
-                    company, answer_dict = future.result()
-                    individual_answers[company] = answer_dict
-                    
-                    company_references = answer_dict.get("references", [])
-                    aggregated_references.extend(company_references)
+                    doc_name, answer_dict = future.result()
+                    individual_answers[doc_name] = answer_dict
+
+                    doc_references = answer_dict.get("references", [])
+                    aggregated_references.extend(doc_references)
                 except Exception as e:
-                    company = future_to_company[future]
-                    print(f"Error processing company {company}: {str(e)}")
+                    doc_name = future_to_doc[future]
+                    print(f"Error processing document {doc_name}: {str(e)}")
                     raise
-        
-        # Remove duplicate references
+
+        # Remove duplicate references (based on SHA1 and page index)
         unique_refs = {}
         for ref in aggregated_references:
             key = (ref.get("pdf_sha1"), ref.get("page_index"))
-            unique_refs[key] = ref
+            if key[0] is not None and key[1] is not None:
+                unique_refs[key] = ref
         aggregated_references = list(unique_refs.values())
-        
+
         # Step 3: Get the comparative answer using all individual answers
         comparative_answer = self.openai_processor.get_answer_from_rag_context(
             question=question,
@@ -513,7 +504,6 @@ class QuestionsProcessor:
             model=self.answering_model
         )
         self.response_data = self.openai_processor.response_data
-        
+
         comparative_answer["references"] = aggregated_references
         return comparative_answer
-    

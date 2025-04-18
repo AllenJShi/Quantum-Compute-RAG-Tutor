@@ -56,7 +56,8 @@ class VectorDBIngestor:
     def _set_up_llm(self):
         load_dotenv()
         llm = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
+            api_key=os.getenv("GEMINI_API_KEY"),
+            base_url=os.getenv("GEMINI_BASE_URL"),
             timeout=None,
             max_retries=2
         )
@@ -88,7 +89,7 @@ class VectorDBIngestor:
     
     def _process_report(self, report: dict):
         text_chunks = [chunk['text'] for chunk in report['content']['chunks']]
-        embeddings = self._get_embeddings(text_chunks)
+        embeddings = self._get_embeddings(text_chunks, model=os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"))
         index = self._create_vector_db(embeddings)
         return index
 

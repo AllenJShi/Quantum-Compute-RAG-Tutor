@@ -313,6 +313,7 @@ class PageTextPreparation:
                 "checkbox_selected",
                 "checkbox_unselected",
                 "formula",
+                "code"
             ):
                 if not text.strip():
                     i += 1

@@ -342,6 +342,27 @@ Answer:
 
     system_prompt_with_schema = build_system_prompt(instruction, example, pydantic_schema)
 
+
+class AnswerWithRAGContextGenericPrompt:
+    instruction = AnswerWithRAGContextSharedPrompt.instruction
+    user_prompt = AnswerWithRAGContextSharedPrompt.user_prompt
+
+    class AnswerSchema(AnswerWithRAGContextNamePrompt.AnswerSchema):
+        final_answer: Union[str, Literal["N/A"]] = Field(description="""
+The final answer to the question, based strictly on the provided context.
+- Extract the answer as accurately as possible from the text.
+- If the information is not available or cannot be determined from the context, return 'N/A'.
+- Do not include extra information, words, or comments not present in the source text unless necessary for clarity.
+""")
+
+    pydantic_schema = re.sub(r"^ {4}", "", inspect.getsource(AnswerSchema), flags=re.MULTILINE)
+
+    example = AnswerWithRAGContextNamePrompt.example
+
+    system_prompt = build_system_prompt(instruction, example)
+    system_prompt_with_schema = build_system_prompt(instruction, example, pydantic_schema)
+
+
 class ComparativeAnswerPrompt:
     instruction = """
 You are a question answering system.

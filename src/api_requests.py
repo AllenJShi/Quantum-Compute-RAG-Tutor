@@ -239,7 +239,7 @@ class BaseIBMAPIProcessor:
 class BaseGeminiProcessor:
     def __init__(self):
         self.llm = self._set_up_llm()
-        self.default_model = 'gemini-2.0-flash-001'
+        self.default_model = 'gemini-2.0-flash'
         # self.default_model = "gemini-2.0-flash-thinking-exp-01-21",
         
     def _set_up_llm(self):
