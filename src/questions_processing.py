@@ -176,8 +176,39 @@ class QuestionsProcessor:
         pages = answer_dict.get("relevant_pages", [])
         validated_pages = self._validate_page_references(pages, retrieval_results)
         answer_dict["relevant_pages"] = validated_pages
-        # References might be less meaningful without a SHA1 if subset.csv is missing/incomplete
-        answer_dict["references"] = self._extract_references(validated_pages, document_name)
+        
+        # Store page-document pairs as a list of objects instead of a dictionary
+        # This allows multiple entries for the same page number from different documents
+        page_sources = []
+        for page in validated_pages:
+            page_sources.append({
+                "page": page,
+                "document": document_name
+            })
+        answer_dict["page_sources"] = page_sources
+        
+        # Create references with source document information
+        references = []
+        for page in validated_pages:
+            # Include both SHA1 (for compatibility) and source_document (for our UI)
+            ref = {
+                "page_index": page,
+                "source_document": document_name
+            }
+            # Add SHA1 if available
+            if self.subset_path and self.subset_path.exists():
+                try:
+                    if not hasattr(self, 'documents_df') or self.documents_df is None:
+                        self.documents_df = pd.read_csv(self.subset_path)
+                    id_column = getattr(self, 'id_column', 'company_name')
+                    matching_rows = self.documents_df[self.documents_df[id_column] == document_name]
+                    if not matching_rows.empty:
+                        ref["pdf_sha1"] = matching_rows.iloc[0]['sha1']
+                except Exception:
+                    pass
+            references.append(ref)
+            
+        answer_dict["references"] = references
 
         return answer_dict
 
@@ -415,13 +446,58 @@ class QuestionsProcessor:
                 schema=schema,
                 model=self.answering_model
             )
+            self.response_data = self.openai_processor.response_data
 
             pages_mentioned = answer_dict.get("relevant_pages", [])
-            retrieved_pages_set = {res['page'] for res in all_retrieval_results}
-            validated_pages = [p for p in pages_mentioned if p in retrieved_pages_set]
-
+            
+            # Create a mapping of page numbers to source documents
+            page_to_doc_mapping = {}
+            for result in all_retrieval_results:
+                page_num = result['page']
+                source_doc = result.get('source_document', 'unknown')
+                page_to_doc_mapping[page_num] = source_doc
+            
+            # Validate pages and associate each with its source document
+            validated_pages = []
+            page_sources = []  # Using a list of objects instead of dict for duplicate page numbers
+            
+            for p in pages_mentioned:
+                if p in page_to_doc_mapping:
+                    validated_pages.append(p)
+                    page_sources.append({
+                        "page": p,
+                        "document": page_to_doc_mapping[p]
+                    })
+            
+            # If we don't have enough validated pages, add some from retrieval results
+            if len(validated_pages) < 2 and all_retrieval_results:
+                existing_pages = set(validated_pages)
+                for result in all_retrieval_results:
+                    page = result['page']
+                    if page not in existing_pages:
+                        validated_pages.append(page)
+                        page_sources.append({
+                            "page": page,
+                            "document": result.get('source_document', 'unknown')
+                        })
+                        existing_pages.add(page)
+                        if len(validated_pages) >= 2:
+                            break
+            
+            # Add the validated pages and their sources to the answer
             answer_dict["relevant_pages"] = validated_pages
-            answer_dict["references"] = []
+            answer_dict["page_sources"] = page_sources
+            
+            # Format references with source document information
+            references = []
+            for page in validated_pages:
+                source_doc = next((ps["document"] for ps in page_sources if ps["page"] == page), 'unknown')
+                references.append({
+                    "page_index": page,
+                    "source_document": source_doc
+                })
+            
+            answer_dict["references"] = references
 
             return answer_dict
             # --- End Search Across All Documents ---

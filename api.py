@@ -55,6 +55,7 @@ class AnswerResponse(BaseModel):
     step_by_step_analysis: str | None = None
     reasoning_summary: str | None = None
     relevant_pages: list[int] | None = None
+    page_sources: list[dict] | None = None  # List of page-document mappings
     error: str | None = None  # Add error field
     # Add model statistics
     model: str | None = None
@@ -200,6 +201,14 @@ async def ask_question(request: QuestionRequest):
         step_by_step = answer_data.get("step_by_step_analysis")
         reasoning = answer_data.get("reasoning_summary")
         relevant_pages = answer_data.get("relevant_pages", [])
+        page_sources = answer_data.get("page_sources", [])
+        
+        # If page_sources is missing but we have references with source_document info, extract from there
+        if not page_sources and "references" in answer_data:
+            page_sources = []
+            for ref in answer_data.get("references", []):
+                if "page_index" in ref and "source_document" in ref:
+                    page_sources.append({"page_index": ref["page_index"], "source_document": ref["source_document"]})
         
         # Get model statistics
         model_stats = getattr(processor, 'response_data', {}) if hasattr(processor, 'response_data') else {}
@@ -209,6 +218,7 @@ async def ask_question(request: QuestionRequest):
             step_by_step_analysis=step_by_step,
             reasoning_summary=reasoning,
             relevant_pages=relevant_pages,
+            page_sources=page_sources,
             model=model_stats.get('model'),
             input_tokens=model_stats.get('input_tokens'),
             output_tokens=model_stats.get('output_tokens')
