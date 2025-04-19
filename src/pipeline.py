@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from pyprojroot import here
 import logging
-import os
 import json
 import pandas as pd
 
@@ -490,8 +489,8 @@ configs = {
 # Just uncomment the method you want to run
 # You can also change the run_config to try out different configurations
 if __name__ == "__main__":
-    # import subprocess
-    # subprocess.run(["python", "-m", "create_subset"])
+    import subprocess
+    subprocess.run(["python", "-m", "create_subset"])
 
     root_path = here() / "data" / "lecture" # Target the lecture dataset
     pipeline = Pipeline(root_path, run_config=gemini_flash_config) # Use gemini_flash config
